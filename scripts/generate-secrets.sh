@@ -10,7 +10,12 @@
 # =============================================================================
 set -euo pipefail
 
-SECRETS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../infra/secrets" && pwd)"
+# Resolve (and create if missing) the secrets directory. On a fresh checkout the
+# dir may not exist because its contents are gitignored and Git doesn't track
+# empty folders — so create it before resolving an absolute path.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$SCRIPT_DIR/../infra/secrets"
+SECRETS_DIR="$(cd "$SCRIPT_DIR/../infra/secrets" && pwd)"
 
 gen() {
   local file="$SECRETS_DIR/$1"

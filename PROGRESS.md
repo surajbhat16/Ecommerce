@@ -92,7 +92,7 @@ the app services gain OpenTelemetry via compose env merge.
 
 ---
 
-## Phase 6 — CI/CD, scanning, prod-like compose ✅ (current)
+## Phase 6 — CI/CD, scanning, prod-like compose ✅
 
 **Adds:** GitHub Actions pipeline, Trivy image scanning, GHCR publishing,
 `docker-compose.prod.yml`, per-service lockfiles.

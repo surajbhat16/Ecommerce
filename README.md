@@ -1,166 +1,289 @@
-# Production-Grade E-Commerce Microservices Platform — Phase 1
+# Production-Grade E-Commerce Microservices Platform
+
+[![ci](https://github.com/YOUR_USERNAME/ECommerce/actions/workflows/ci.yml/badge.svg)](https://github.com/surajbhat16/ECommerce/actions/workflows/ci.yml)
 
 A locally-runnable, production-patterned microservices system built to demonstrate
-**DevOps / container engineering** depth: multi-stage builds, Docker secrets,
-health checks, resource limits, network segmentation, a reverse proxy + load
-balancer, and the seams for full observability and CI/CD.
+**DevOps and container-engineering depth** end to end: multi-stage image builds,
+file-based secrets, liveness/readiness probes, resource limits, network
+segmentation, a TLS-terminating edge proxy, an event-driven checkout saga over a
+message broker, a full three-pillar observability stack, and a complete CI/CD
+pipeline with image scanning and a production compose profile.
 
-> **This is Phase 1 — the foundation slice.** It stands up the edge, the API
-> gateway (scaled + load-balanced), and the Auth service with its own private
-> PostgreSQL. Every cross-cutting production pattern is established here so later
-> services just reuse the template. See `PROGRESS.md` for the full roadmap.
+The focus throughout is **infrastructure and delivery engineering**, not business
+logic. Every service is intentionally thin; the interesting parts are how the
+services are built, wired, secured, observed, and shipped.
+
+> Built in six cumulative phases. Each phase adds one architectural capability and
+> reuses the patterns established before it. See `PROGRESS.md` for the phase log and
+> `docs/CONCEPTS.md` for 17 concept deep-dives with **187 senior interview Q&A**.
 
 ---
 
-## What Phase 1 demonstrates
+## Table of contents
 
-| Concern | How it's shown here |
+- [What this platform demonstrates](#what-this-platform-demonstrates)
+- [The six phases at a glance](#the-six-phases-at-a-glance)
+- [Full architecture](#full-architecture)
+- [The services](#the-services)
+- [Quick start](#quick-start)
+- [Verifying each phase](#verifying-each-phase)
+- [The three demo saga paths](#the-three-demo-saga-paths)
+- [Observability](#observability)
+- [CI/CD pipeline](#cicd-pipeline)
+- [Production profile](#production-profile)
+- [Project layout](#project-layout)
+- [Design decisions worth defending](#design-decisions-worth-defending)
+- [Documentation](#documentation)
+
+---
+
+## What this platform demonstrates
+
+| Concern | How it is shown |
 |---|---|
-| **Multi-stage builds** | Every service: `deps → build → runtime`, non-root, slim runtime image |
-| **Secrets management** | Docker secrets mounted at `/run/secrets/*`, read via `*_FILE`; never env vars |
-| **Health checks** | Liveness vs readiness split; `depends_on: service_healthy` gating |
+| **Multi-stage builds** | Every service: `deps -> build -> runtime`, non-root `USER node`, slim runtime |
+| **Secrets management** | Docker secrets mounted at `/run/secrets/*`, read via `*_FILE`; never plain env |
+| **Health checks** | Liveness vs readiness split; `depends_on: service_healthy` gating startup order |
 | **Resource limits** | CPU + memory `limits`/`reservations` on every container |
-| **Network segmentation** | `edge` / `backend` / `auth-data` (internal); DB unreachable from edge |
-| **Reverse proxy** | Traefik terminates TLS, routes by Docker labels |
-| **Load balancing** | Gateway scaled to N replicas; Traefik round-robins across them |
-| **Graceful shutdown** | SIGTERM handling + `init: true` (tini) solving the PID-1 problem |
-| **12-factor config** | Strict env/secret separation; stateless services (k8s-ready seams) |
+| **Network segmentation** | `edge` / `backend` / per-datastore internal networks; DBs unreachable from the edge |
+| **Reverse proxy + TLS** | Traefik terminates HTTPS, routes by Docker labels, load-balances replicas |
+| **Cache-aside** | Catalog reads MongoDB through a Redis cache |
+| **Saga orchestration** | Checkout coordinated across Order/Payment/Inventory with compensation |
+| **Transactional outbox** | Atomic DB-write + event-publish, no dual-write data loss |
+| **Idempotency** | Duplicate events deduplicated; at-least-once delivery made safe |
+| **Dead-letter queue** | Poison messages isolated without blocking the main queue |
+| **Pub/sub fan-out** | Notification service consumes the same events via its own queue |
+| **Metrics** | Prometheus scrapes RED histograms + domain counters from all 8 services |
+| **Centralized logs** | Promtail ships structured pino JSON to Loki, labeled by service |
+| **Distributed tracing** | OpenTelemetry traces one checkout across services AND the broker |
+| **CI/CD** | GitHub Actions: lint -> build/test -> scan -> full-stack smoke -> GHCR publish |
+| **Supply-chain security** | hadolint + Trivy CVE gate; `no-new-privileges` runtime hardening |
+| **Dev/prod parity** | Layered compose; prod profile strips debug ports and scales the gateway |
 
 ---
 
-## Prerequisites
+## The six phases at a glance
 
-- Docker Engine + Docker Compose v2 (`docker compose version`)
-- `make`, `bash`, `openssl`, `curl` (standard on macOS/Linux; on Windows use WSL2)
-- Add these to your hosts file so the local domains resolve:
-
-  ```
-  127.0.0.1 api.localhost traefik.localhost
-  ```
-  (On most systems `*.localhost` already resolves to 127.0.0.1 and you can skip this.)
-
----
-
-## Run it — step by step
-
-> Follow this order. Each step says what to run and what "healthy" looks like.
-
-### 1. One-time setup — generate secrets and TLS cert
-
-```bash
-make init
-```
-
-This runs `generate-secrets.sh` (random DB password + JWT key into
-`infra/secrets/*.txt`, gitignored) and `generate-certs.sh` (a self-signed cert for
-local HTTPS). **Expected:** lines like `generated: auth_db_password.txt` and
-`Generated self-signed cert ...`.
-
-### 2. Build and start the stack
-
-```bash
-make up
-```
-
-This builds all images (multi-stage) and starts everything detached. **Expected:**
-container list, then the printed URLs.
-
-### 3. Watch it become healthy
-
-```bash
-make status
-```
-
-Re-run until every service shows `healthy`. **Expected:** `auth-db` healthy first,
-then `auth-service` (it waits for the DB), then `api-gateway` and `traefik`.
-
-> If `auth-service` is stuck "starting": it's waiting on the DB healthcheck — give
-> it ~15s on first boot while Postgres initialises and runs the migration.
-
-### 4. Smoke-test the full path (client → Traefik → Gateway → Auth → Postgres)
-
-```bash
-make smoke
-```
-
-**Expected:** a `201` registration, a login returning `accessToken`/`refreshToken`,
-a protected `/whoami` returning your `userId`, and a `401` when the token is omitted.
+| Phase | Capability added | Key services / infra |
+|---|---|---|
+| **1** | Edge, auth, foundation patterns | Traefik, API Gateway (JWT, rate limit), Auth + PostgreSQL |
+| **2** | Synchronous read path | Catalog (MongoDB + Redis cache-aside), Cart (Redis primary store) |
+| **3** | Async write path — the checkout saga | Order orchestrator, Payment, Inventory, RabbitMQ (outbox, idempotency, DLQ) |
+| **4** | Event fan-out | Notification service (pure event consumer, event-carried state transfer) |
+| **5** | Observability (three pillars) | Prometheus, Grafana, Loki + Promtail, Jaeger + OpenTelemetry |
+| **6** | Delivery & hardening | GitHub Actions CI/CD, Trivy, GHCR, production compose profile |
 
 ---
 
-## Prove each concept (the "show me" commands)
+## Full architecture
 
-These are designed so you can *demonstrate* each pattern — useful for interviews.
-
-### Load balancing across gateway replicas
-
-```bash
-make scale-gateway     # scale gateway to 3 replicas
-make demo-lb           # fire 6 requests; watch x-served-by-gateway change
+```
+                                  HTTPS (TLS terminated at the edge)
+                                            │
+                                  ┌─────────▼──────────┐
+   ┌──────────────┐              │      Traefik        │      edge network
+   │  Prometheus  │─ scrapes ───▶│  reverse proxy +    │  routes by Docker labels,
+   │  (metrics)   │   :8082      │  TLS + load balancer │  round-robins gateway replicas
+   └──────┬───────┘              └─────────┬──────────┘
+          │                                │
+          │ scrapes /metrics     ┌─────────▼──────────┐
+          │ from every service   │    API Gateway      │  JWT validation, rate limiting
+          │                      │  (2+ stateless      │  injects x-user-id downstream
+          │                      │   replicas)         │
+          │                      └─────────┬──────────┘
+          │                                │  backend network
+          │        ┌───────────────┬───────┼────────────┬──────────────────┐
+          │        ▼               ▼       ▼            ▼                  ▼
+          │   ┌─────────┐   ┌───────────┐ ┌──────┐ ┌──────────┐    ┌──────────────┐
+          │   │  Auth   │   │  Catalog  │ │ Cart │ │  Order   │    │ Notification │
+          │   │         │   │           │ │      │ │ (saga    │    │  (consumer)  │
+          │   └────┬────┘   └─────┬─────┘ └──┬───┘ │ orchestr.)│    └──────▲───────┘
+          │        │              │          │     └────┬─────┘           │
+          │   auth-data      catalog-data  cart-data    │                 │
+          │        │           │      │       │         │  publishes /    │ consumes
+          │   ┌────▼───┐  ┌────▼──┐ ┌─▼───┐ ┌─▼────┐    │  consumes       │ (fan-out)
+          │   │auth-db │  │ mongo │ │redis│ │redis │    │  events         │
+          │   │(pgsql) │  │       │ │cache│ │(cart)│    ▼                 │
+          │   └────────┘  └───────┘ └─────┘ └──────┘  ┌──────────────────────────┐
+          │                                           │        RabbitMQ           │
+          │        ┌──────────┐      ┌──────────┐     │  topic exchange + durable │
+          │        │ Payment  │◀────▶│Inventory │◀───▶│  queues + dead-letter     │
+          │        │          │      │          │     │  (trace context in headers)│
+          │        └────┬─────┘      └────┬─────┘     └──────────────────────────┘
+          │        payment-db        inventory-db
+          │        (pgsql)           (pgsql)
+          │
+          │   OBSERVABILITY (separate compose layer — a feature flag)
+          └──▶ Prometheus ─┐
+               Loki ◀── Promtail (Docker socket → all container logs)
+               Jaeger ◀── OpenTelemetry (OTLP; context crosses RabbitMQ)
+               Grafana ─── dashboards over Prometheus + Loki + Jaeger
 ```
 
-**What you're seeing:** Traefik round-robins requests across the 3 stateless
-gateway replicas. The `x-served-by-gateway` header changes between responses —
-that's the load balancer at work. (Why can we scale it freely? Because the gateway
-holds no state; identity lives in the JWT.)
+Every datastore sits on its own `internal: true` network, reachable only by its
+owning service — database-per-service enforced at the network layer, not by
+convention. The observability stack lives in its own compose file: omit it and the
+platform runs exactly as before; add it and five containers plus zero-code
+OpenTelemetry instrumentation switch on.
 
-### Secrets are not leaking into the environment
+---
+
+## The services
+
+| Service | Stack | Role | Datastore |
+|---|---|---|---|
+| **gateway** | Node/TS, Fastify | Edge app layer: JWT auth, rate limiting, routing | — (stateless) |
+| **auth** | Node/TS, Fastify | Register/login, issues JWTs | PostgreSQL (private) |
+| **catalog** | Node/TS, Fastify | Product reads via cache-aside | MongoDB + Redis cache |
+| **cart** | Node/TS, Fastify | Shopping cart | Redis (primary store) |
+| **order** | Node/TS, Fastify | Checkout saga orchestrator + state machine | PostgreSQL + outbox |
+| **payment** | Node/TS | Payment authorization (deterministic demo) | PostgreSQL |
+| **inventory** | Node/TS | Stock reservation + compensation | PostgreSQL |
+| **notification** | Node/TS | Pure event consumer (pub/sub fan-out) | none (in-memory projection) |
+
+All eight share the same patterns: multi-stage Dockerfile, non-root runtime,
+file-based secrets, liveness/readiness probes, structured pino logging, graceful
+shutdown, and (Phase 5) Prometheus metrics + OpenTelemetry tracing.
+
+---
+
+## Quick start
+
+**Prerequisites:** Docker Engine + Docker Compose v2, plus `bash`, `openssl`, and
+`curl`. On Windows, run the shell scripts via WSL2 or Git Bash; the verify scripts
+are PowerShell.
 
 ```bash
-make demo-secrets
-```
+# 1. Generate local secrets and a self-signed TLS cert (gitignored, never committed)
+bash scripts/generate-secrets.sh
+bash scripts/generate-certs.sh
 
-**What you're seeing:** `docker ... env` shows only `JWT_SIGNING_KEY_FILE` (a path),
-**not** the secret value. The actual key exists only as a file under `/run/secrets/`.
-This is why we use file-based secrets — `docker inspect`/env dumps can't leak them.
-
-### Self-healing via restart policy
-
-```bash
-make demo-healing
-```
-
-**What you're seeing:** killing `auth-service` triggers `restart: unless-stopped`,
-and Docker brings it back. Combined with the readiness probe, traffic only resumes
-once it's actually ready again.
-
-### Network segmentation (the DB is isolated)
-
-```bash
-# The gateway is on edge+backend but NOT on auth-data, so it cannot reach the DB:
+# 2. Boot the full stack including observability (21 containers)
 docker compose -f docker-compose.yml -f docker-compose.data.yml \
-  exec api-gateway node -e "fetch('http://auth-db:5432').catch(e=>{console.log('blocked:', e.code);process.exit(0)})"
+  -f docker-compose.observability.yml -f docker-compose.override.yml up --build -d
+
+# 3. Wait until every container is healthy
+docker compose -f docker-compose.yml -f docker-compose.data.yml \
+  -f docker-compose.observability.yml -f docker-compose.override.yml ps
 ```
 
-**What you're seeing:** the gateway can't resolve/reach `auth-db` because it isn't
-attached to the `auth-data` network. Only `auth-service` is. Database-per-service,
-enforced at the network layer.
+For the core platform without observability, drop the
+`-f docker-compose.observability.yml` file — everything else is identical.
+
+**Windows note (PowerShell 5.1):** the verify scripts use `curl.exe` with
+`-H "Expect:"` and file-based JSON bodies to work around 5.1's HTTP quirks
+(self-signed cert handling and the `Expect: 100-continue` header the proxy
+rejects). This is baked in; no action needed.
+
+**Local URLs**
+
+| URL | What |
+|---|---|
+| `https://api.localhost` | The platform edge (via Traefik) |
+| `http://localhost:8081` | Traefik dashboard |
+| `http://localhost:15672` | RabbitMQ management (guest/guest) |
+| `http://localhost:3030` | Grafana (admin/admin) |
+| `http://localhost:9090` | Prometheus |
+| `http://localhost:16686` | Jaeger tracing UI |
 
 ---
 
-## Architecture (Phase 1)
+## Verifying each phase
+
+Each phase ships a PowerShell verification script that drives the running stack and
+asserts behavior with green/red output.
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # once per terminal
+
+.\scripts\verify-phase3.ps1   # saga: all three terminal paths + outbox/idempotency/DLQ
+.\scripts\verify-phase4.ps1   # fan-out: notifications delivered + attributed
+.\scripts\verify-phase5.ps1   # observability: metrics + logs + a cross-service trace
+.\scripts\verify-phase6.ps1   # delivery: lockfiles + prod profile renders correctly
+```
+
+---
+
+## The three demo saga paths
+
+Checkout is a saga orchestrated by the Order service over RabbitMQ. Three
+deterministic paths demonstrate the full lifecycle including rollback:
+
+| Order | Outcome | What it proves |
+|---|---|---|
+| `BOOK-001 x1` | **CONFIRMED** | Happy path: reserve stock -> authorize payment -> confirm |
+| `LAPTOP-001 x1` | **FAILED** (compensated) | Payment declines -> **compensating transaction** releases the reserved stock |
+| `LAPTOP-001 x3` | **REJECTED** | Insufficient stock -> rejected before payment; nothing to compensate |
+
+The FAILED path is the important one: it shows the saga rolling back partial work
+via an `inventory.release` compensating event, verified by stock returning to its
+starting level.
+
+---
+
+## Observability
+
+Three pillars, wired to answer three different questions:
+
+- **Metrics (Prometheus + Grafana)** — *what* is happening. Every service exposes a
+  RED histogram (`http_request_duration_seconds`) plus domain counters
+  (`orders_terminal_total{status}`, `payments_total{outcome}`, etc.). Labels are
+  bounded to closed sets to keep cardinality safe. A provisioned Grafana dashboard
+  shows request rates, p95 latency, the saga funnel, queue depth, and live logs.
+- **Logs (Loki + Promtail)** — *why* it happened. Promtail discovers containers over
+  the Docker socket, parses the pino JSON, and labels each stream by service — the
+  same label key the metrics use, so Grafana pivots between them.
+- **Traces (Jaeger + OpenTelemetry)** — *where* it happened. Auto-instrumentation is
+  loaded via `NODE_OPTIONS --import` with **zero application code changes**. The
+  amqplib instrumentation propagates W3C trace context through RabbitMQ message
+  headers, so a single checkout trace spans the gateway, order, broker, inventory,
+  and payment — the most compelling artifact in the project.
+
+---
+
+## CI/CD pipeline
+
+`.github/workflows/ci.yml` runs on every push and pull request, ordered
+cheap-to-expensive so failures surface fast:
 
 ```
-                       ┌──────────────────────┐
-   client ──HTTPS────▶ │       Traefik        │   edge network
-                       │  TLS + load balancer  │
-                       └───────────┬──────────┘
-                                   │  (round-robins across gateway replicas)
-                     ┌─────────────┼─────────────┐
-                     ▼             ▼             ▼
-                ┌─────────┐  ┌─────────┐  ┌─────────┐
-                │ gateway │  │ gateway │  │ gateway │   (stateless, scaled)
-                └────┬────┘  └────┬────┘  └────┬────┘
-                     └────────────┼────────────┘   backend network
-                                  ▼
-                          ┌───────────────┐
-                          │ auth-service  │
-                          └───────┬───────┘
-                                  │  auth-data network (internal: true)
-                          ┌───────▼───────┐
-                          │   auth-db     │  (PostgreSQL, isolated)
-                          └───────────────┘
+hadolint ─┐
+          ├─▶ image-build-scan (matrix ×8, Trivy CVE gate) ─┐
+build-test┘                                                 ├─▶ push-images
+                       compose-smoke (full stack in CI) ────┘   (main only)
 ```
+
+- **build-test** (matrix ×8): `npm ci` (lockfile-exact) + `tsc` per service.
+- **hadolint**: lints every Dockerfile.
+- **image-build-scan** (matrix ×8): builds each image and fails on fixable
+  CRITICAL/HIGH CVEs via Trivy.
+- **compose-smoke**: boots the entire platform inside the runner and drives the
+  saga end-to-end — catching integration breaks no unit test can see.
+- **push-images**: on `main` only, after everything is green, publishes each image
+  to GHCR tagged with the immutable commit SHA plus `latest`.
+
+Reproducible builds are guaranteed by per-service `package-lock.json` files, so the
+Dockerfiles' `npm ci` path installs identical dependency trees every time.
+
+---
+
+## Production profile
+
+`docker-compose.prod.yml` is a production-like overlay. Because every debug port
+lives in the dev override file, prod is achieved by **omission**:
+
+```bash
+# dev:   base + data + observability + override  (all the conveniences)
+# prod:  base + data + prod                       (override absent)
+docker compose -f docker-compose.yml -f docker-compose.data.yml \
+  -f docker-compose.prod.yml up -d --build
+```
+
+This yields: only ports 80/443 published (Traefik's dashboard port stripped via the
+`!override` tag), two gateway replicas load-balanced by Traefik, `no-new-privileges`
+and log rotation on every container, and `NODE_ENV=production`. The file documents
+its own honest gaps (demo credentials, self-signed certs) as the register of what a
+real deployment would harden next.
 
 ---
 
@@ -168,57 +291,74 @@ enforced at the network layer.
 
 ```
 .
-├── docker-compose.yml            # BASE: networks, traefik, gateway, auth, secrets
-├── docker-compose.data.yml       # DATA: auth postgres
-├── docker-compose.override.yml   # DEV: host port exposure for debugging
-├── Makefile                      # the front door (make help)
-├── PROGRESS.md                   # full roadmap + what each phase adds
+├── .github/workflows/ci.yml          # CI/CD pipeline
+├── docker-compose.yml                # BASE: networks, traefik, gateway, all services
+├── docker-compose.data.yml           # DATA: every datastore
+├── docker-compose.observability.yml  # OBSERVABILITY layer (Prometheus/Grafana/Loki/Jaeger)
+├── docker-compose.override.yml       # DEV: host port exposure for debugging
+├── docker-compose.prod.yml           # PROD: hardening, replicas, no debug ports
+├── Makefile                          # convenience front door
+├── PROGRESS.md                       # phase-by-phase log
 ├── docs/
-│   └── INTERVIEW_QA.md           # senior DevOps interview Q&A for Phase 1 concepts
+│   ├── CONCEPTS.md                   # 17 deep-dives, 187 senior interview Q&A
+│   ├── PHASE{3..6}_CONCEPTS.pdf      # typeset concept documents
+│   └── PHASE{2..6}_RUNBOOK.md        # run/verify runbooks per phase
 ├── infra/
-│   ├── secrets/                  # *.txt (gitignored) + *.example templates
-│   └── traefik/                  # static + dynamic config, certs
-├── scripts/                      # init, certs, secrets, smoke test
-└── services/
-    ├── gateway/                  # API gateway (TS) — multi-stage Dockerfile
-    └── auth/                     # auth service (TS) + db migrations
+│   ├── secrets/                      # *.txt (gitignored) + *.example templates
+│   ├── traefik/                      # static + dynamic config, certs (gitignored)
+│   ├── prometheus/  loki/  promtail/ # observability configs
+│   ├── grafana/                      # provisioned datasources + dashboards
+│   └── rabbitmq/                     # prometheus plugin enablement
+├── scripts/                          # secrets/cert generation, smoke + verify scripts
+└── services/                         # the 8 services, each a multi-stage Dockerfile
+    ├── gateway/  auth/  catalog/  cart/
+    └── order/  payment/  inventory/  notification/
 ```
 
 ---
 
-## Design decisions worth defending (interview ammunition)
+## Design decisions worth defending
 
-- **Two layers at the edge (Traefik + Gateway).** Traefik owns *transport*
-  (TLS, L7 load balancing); the gateway owns *application* concerns (routing,
-  JWT validation, rate limiting). Separation of concerns, independently scalable.
-- **Database-per-service, enforced by network.** `auth-data` is `internal: true`
-  and only the auth service + its DB attach to it. Not just convention — topology.
-- **Secrets as files, not env.** Env vars leak via `docker inspect`, child
-  processes, and logs. File-mounted secrets don't.
-- **Liveness ≠ readiness.** Liveness must not check dependencies (avoids restart
-  storms during a DB blip); readiness does (stops traffic to an instance that
-  can't serve). Mixing them is a classic mistake interviewers probe.
-- **Known limitation — rate limiting is per-replica.** In-memory counters mean N
-  replicas allow N×max. The fix is a shared Redis store; we add it later. Naming
-  your own limitations is a senior signal.
-
-See `docs/INTERVIEW_QA.md` for 12+ detailed Q&A on these.
-
----
-
-## Common issues
-
-- **Browser warns about the certificate** — expected; it's self-signed. Proceed,
-  or use `curl -k`.
-- **`api.localhost` doesn't resolve** — add it to `/etc/hosts` (see Prerequisites).
-- **Port 80/443/5433 already in use** — stop the conflicting local service, or
-  edit the published ports in the override file.
-- **`auth-service` won't go healthy** — check `make logs-auth`; usually the DB
-  hasn't finished first-time init. Wait, or `make clean && make up` to reset.
+- **Two layers at the edge.** Traefik owns transport (TLS, L7 load balancing); the
+  gateway owns application concerns (routing, JWT, rate limiting). Separately
+  scalable, separately reasoned about.
+- **Database-per-service, enforced by network.** Each datastore's network is
+  `internal: true`; only its owner attaches. Isolation is topology, not etiquette.
+- **Secrets as files, not env.** Environment variables leak via `docker inspect`,
+  child processes, and logs. File-mounted secrets do not.
+- **Liveness is not readiness.** Liveness avoids dependency checks (no restart storms
+  during a DB blip); readiness includes them (stop routing to an instance that can't
+  serve). Conflating them is a classic mistake.
+- **Orchestration over choreography for the saga.** The checkout logic lives in one
+  place (the Order service) — explicit, traceable, changeable — at the cost of a
+  central coordinator. Defensible either way; the point is being able to argue it.
+- **Transactional outbox over dual writes.** Writing the DB row and the event in one
+  transaction removes the window where a crash leaves them inconsistent.
+- **Per-consumer idempotency strength.** Inventory uses a durable processed-events
+  table (money-adjacent); notification uses a bounded in-memory set (a duplicate
+  email is harmless). Matching the mechanism to the blast radius, not maxing it
+  everywhere.
+- **Observability as a compose layer.** Tracing loads via `NODE_OPTIONS` only when
+  the observability file is present — zero overhead and zero code coupling when it
+  is not.
+- **Prod by omission.** Debug ports never reach prod because they live only in the
+  dev override; the prod chain simply does not include that file. Config you cannot
+  forget to remove.
 
 ---
 
-## Next: Phase 2
+## Documentation
 
-Product Catalog (MongoDB + Redis cache) and Cart (Redis) — the synchronous read
-path — plus the catalog/cart routes wired through the gateway. See `PROGRESS.md`.
+- **`PROGRESS.md`** — what each phase adds and why, with checkboxes.
+- **`docs/CONCEPTS.md`** — 17 concept deep-dives (saga, outbox, idempotency,
+  delivery semantics, DLQ, fan-out, event-carried state transfer, the three
+  observability pillars, CI/CD, supply-chain security, dev/prod parity), each with
+  minute sub-concepts, worked examples from this codebase, and 10 senior interview
+  Q&A. **187 Q&A total.**
+- **`docs/PHASE*_RUNBOOK.md`** — step-by-step run and verify instructions per phase.
+- **`docs/PHASE*_CONCEPTS.pdf`** — the concept deep-dives, typeset for reading.
+
+---
+
+*Built as a DevOps portfolio project: production patterns, honestly labeled
+limitations, and every architectural claim verified by a script you can run.*
