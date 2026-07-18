@@ -1,0 +1,71 @@
+# =============================================================================
+# traefik.yml — Traefik STATIC configuration.
+#
+# Traefik has two config tiers:
+#   - STATIC (this file): set at startup — entrypoints, providers, TLS defaults.
+#   - DYNAMIC (dynamic/*.yml + Docker labels): routing rules that can change at
+#     runtime without restarting Traefik.
+#
+# ROLE IN OUR ARCHITECTURE: Traefik is the EDGE. It terminates TLS and load-
+# balances incoming traffic across API-Gateway replicas. It discovers services
+# automatically from Docker labels (the `docker` provider below).
+# =============================================================================
+
+# Entrypoints = the ports Traefik listens on.
+entryPoints:
+  web:
+    address: ":80"
+    # Redirect all plain HTTP to HTTPS — TLS everywhere at the edge.
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+  # Traefik's own dashboard/admin API (we expose it locally for inspection).
+  traefik:
+    address: ":8081"
+  # Phase 5: dedicated entrypoint for Prometheus to scrape — internal only,
+  # never published to the host.
+  metrics:
+    address: ":8082"
+
+# Providers = where Traefik LEARNS about services and routes.
+providers:
+  # Docker provider: Traefik watches the Docker socket and configures routes from
+  # container LABELS. This is why we don't hand-write routes per service — each
+  # service declares its own routing via labels in the compose file.
+  docker:
+    exposedByDefault: false   # only containers with `traefik.enable=true` are routed
+    network: edge             # Traefik talks to services on the `edge` network
+  # File provider: for static dynamic-config (TLS certs) that isn't label-driven.
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+# The dashboard/API. `insecure: true` is acceptable ONLY locally — it exposes the
+# dashboard without auth on the :8081 entrypoint. Never do this in real prod.
+api:
+  dashboard: true
+  insecure: true
+
+# The /ping health endpoint, bound to the traefik entrypoint (:8081). This is what
+# the container's healthcheck (`traefik healthcheck --ping`) calls. Without this
+# block the endpoint doesn't exist and the healthcheck would report unhealthy even
+# though routing works fine.
+ping:
+  entryPoint: traefik
+
+# Sensible logging. JSON format so it could be shipped to Loki like everything else.
+log:
+  level: INFO
+accessLog: {}
+
+# Phase 5: Prometheus metrics. Traefik exposes edge-level metrics (request
+# rates, durations, per-router/service counters) on a DEDICATED entrypoint so
+# metrics never share a port with real traffic. Prometheus scrapes :8082.
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addRoutersLabels: true

@@ -1,0 +1,43 @@
+# =============================================================================
+# prometheus.yml — Phase 5 scrape configuration.
+#
+# Prometheus PULLS /metrics from every target on its own schedule. Targets are
+# addressed by Docker DNS name on the shared networks — no host ports needed
+# for scraping; only the Prometheus UI itself is published (9090).
+#
+# Every app service exposes prom-client metrics on its app port. The `service`
+# label is set BY the services themselves (registry default labels), so scrape
+# labels here are only for infra targets that can't label themselves.
+# =============================================================================
+global:
+  scrape_interval: 10s        # local demo: fast feedback. Prod is usually 15-60s.
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: 'app-services'
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 'api-gateway:8080'
+          - 'auth-service:3000'
+          - 'catalog-service:3000'
+          - 'cart-service:3000'
+          - 'order-service:3000'
+          - 'payment-service:3000'
+          - 'inventory-service:3000'
+          - 'notification-service:3000'
+
+  - job_name: 'traefik'
+    static_configs:
+      - targets: ['traefik:8082']
+        labels: { service: 'traefik' }
+
+  - job_name: 'rabbitmq'
+    static_configs:
+      - targets: ['rabbitmq:15692']
+        labels: { service: 'rabbitmq' }
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels: { service: 'prometheus' }

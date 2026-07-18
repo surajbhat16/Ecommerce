@@ -1,0 +1,33 @@
+# =============================================================================
+# loki-config.yml — single-binary Loki for local use.
+#
+# Loki indexes LABELS, not log content (that's the whole design bet — see
+# CONCEPTS.md #13). Content is stored compressed in chunks on the filesystem
+# and grep'd at query time within the label-selected streams.
+# =============================================================================
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h

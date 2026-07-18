@@ -1,0 +1,180 @@
+# =============================================================================
+# docker-compose.observability.yml — Phase 5 layer.
+#
+# A fourth compose file demonstrating LAYERING AS A FEATURE FLAG:
+#   - run WITHOUT this file → the platform runs exactly as in Phase 4
+#     (no tracing env → the OTel SDK is never loaded; zero overhead)
+#   - add this file → 5 observability containers start AND the app services
+#     gain OpenTelemetry env via compose's merge semantics (maps merge by key)
+#
+# Chain:
+#   docker compose -f docker-compose.yml -f docker-compose.data.yml \
+#     -f docker-compose.observability.yml -f docker-compose.override.yml ...
+#
+# TRACING WITHOUT CODE CHANGES: NODE_OPTIONS --import loads the OpenTelemetry
+# auto-instrumentation register before the app. It patches http/fastify/pg/
+# ioredis/mongodb/amqplib — amqplib patching injects/extracts the W3C trace
+# context through RabbitMQ message headers, which is what stitches ONE trace
+# across order → broker → inventory/payment.
+#
+# App services deliberately do NOT depends_on jaeger: the OTLP exporter fails
+# soft (buffers/retries/drops). Telemetry must never take the platform down.
+# =============================================================================
+
+networks:
+  observability:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+
+# Shared OTel env for every Node service (YAML anchor — merged per-service).
+x-otel-env: &otel-env
+  NODE_OPTIONS: "--import @opentelemetry/auto-instrumentations-node/register"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+  OTEL_TRACES_EXPORTER: "otlp"
+  OTEL_METRICS_EXPORTER: "none"   # metrics go via Prometheus pull, not OTLP push
+  OTEL_LOGS_EXPORTER: "none"      # logs go via Promtail → Loki
+  OTEL_NODE_ENABLED_INSTRUMENTATIONS: "http,undici,fastify,pg,ioredis,mongodb,amqplib"
+  # Skip cloud-metadata detectors (we're local) — avoids startup probe warnings.
+  OTEL_NODE_RESOURCE_DETECTORS: "env,host,os,container"
+
+services:
+  # ── Overlays onto existing app services (defined in docker-compose.yml) ────
+  api-gateway:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "api-gateway"
+  auth-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "auth-service"
+  catalog-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "catalog-service"
+  cart-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "cart-service"
+  order-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "order-service"
+  payment-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "payment-service"
+  inventory-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "inventory-service"
+  notification-service:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: "notification-service"
+
+  # RabbitMQ overlay: enable the built-in prometheus plugin (metrics on :15692).
+  rabbitmq:
+    volumes:
+      - ./infra/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+
+  # ── The observability stack itself ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=24h"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    # backend: scrape app services + rabbitmq; edge: scrape traefik:8082;
+    # observability: be reachable by grafana.
+    networks: [backend, edge, observability]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"       # local demo only
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3030:3000"]   # host 3000 is taken by auth-service's debug port
+    networks: [observability]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      prometheus: { condition: service_healthy }
+      loki: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.8
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    ports: ["3100:3100"]   # published for the verify script's LogQL queries
+    networks: [observability]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.8
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./infra/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # Read-only Docker socket: promtail DISCOVERS containers and READS their
+      # logs over the Docker API — no /var/lib/docker mount needed, which is
+      # what makes this work identically on Docker Desktop (WSL2).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [observability]
+    depends_on:
+      loki: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["16686:16686"]   # UI; OTLP 4318 stays internal (backend network)
+    # backend: receive OTLP from app services; observability: Grafana datasource.
+    networks: [backend, observability]
+    # No healthcheck: the all-in-one image has no shell/wget. The OTel exporter
+    # in each service fails soft, so nothing needs to gate on jaeger anyway.
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
+    restart: unless-stopped

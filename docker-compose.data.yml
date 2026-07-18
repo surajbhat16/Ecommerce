@@ -1,0 +1,260 @@
+# =============================================================================
+# docker-compose.data.yml — DATA TIER overlay.
+#
+# Separating databases into their own compose file is deliberate:
+#   - keeps the stateful tier visually/logically distinct from stateless services,
+#   - lets you bring data up independently (e.g. `make data-up` before seeding),
+#   - models how teams often separate "platform/data" from "application" configs.
+#
+# Compose merges this with the base file. The auth-db here is the partner the
+# base file's auth-service `depends_on`.
+# =============================================================================
+
+secrets:
+  auth_db_password:
+    file: ./infra/secrets/auth_db_password.txt
+  catalog_mongo_password:
+    file: ./infra/secrets/catalog_mongo_password.txt
+  order_db_password:
+    file: ./infra/secrets/order_db_password.txt
+  payment_db_password:
+    file: ./infra/secrets/payment_db_password.txt
+  inventory_db_password:
+    file: ./infra/secrets/inventory_db_password.txt
+
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Auth database — PostgreSQL, PRIVATE to the auth service.
+  #
+  # Attached ONLY to the auth-data network (internal: true). It has NO route to
+  # the internet and is unreachable from edge/backend. The ONLY thing that can
+  # talk to it is auth-service. This is database-per-service enforced by network.
+  # ───────────────────────────────────────────────────────────────────────────
+  auth-db:
+    image: postgres:16-alpine
+    init: true
+    environment:
+      POSTGRES_DB: "authdb"
+      POSTGRES_USER: "authuser"
+      # The official Postgres image supports *_FILE for its own secrets too —
+      # so the DB password also comes from a Docker secret, never plain env.
+      POSTGRES_PASSWORD_FILE: "/run/secrets/auth_db_password"
+    secrets:
+      - auth_db_password
+    networks:
+      - auth-data
+    volumes:
+      # Named volume for durable storage — data survives container recreation.
+      - auth_db_data:/var/lib/postgresql/data
+      # Migrations auto-run on FIRST init (empty data dir) only.
+      - ./services/auth/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # pg_isready confirms the server accepts connections → gates auth-service
+      # startup via depends_on: condition: service_healthy.
+      test: ["CMD-SHELL", "pg_isready -U authuser -d authdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:    { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 2 — Catalog MongoDB. PRIVATE to the catalog service (catalog-data net).
+  # ───────────────────────────────────────────────────────────────────────────
+  catalog-mongo:
+    image: mongo:7
+    init: true
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "root"
+      # The mongo image supports *_FILE for the root password → Docker secret.
+      MONGO_INITDB_ROOT_PASSWORD_FILE: "/run/secrets/catalog_mongo_password"
+      MONGO_INITDB_DATABASE: "catalogdb"
+    secrets:
+      - catalog_mongo_password
+    networks:
+      - catalog-data
+    volumes:
+      - catalog_mongo_data:/data/db
+      # Seed script auto-runs on first init (see services/catalog/db/seed.js).
+      - ./services/catalog/db/seed.js:/docker-entrypoint-initdb.d/seed.js:ro
+    healthcheck:
+      # mongosh ping confirms the server is accepting connections.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:    { cpus: "0.75", memory: 512M }
+        reservations: { cpus: "0.10", memory: 256M }
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 2 — Catalog Redis (the cache-aside layer). PRIVATE to catalog.
+  # ───────────────────────────────────────────────────────────────────────────
+  catalog-redis:
+    image: redis:7-alpine
+    init: true
+    # Cache workload: allow eviction under memory pressure (it's just a cache).
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    networks:
+      - catalog-data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:    { cpus: "0.25", memory: 160M }
+        reservations: { cpus: "0.05", memory: 64M }
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 2 — Cart Redis (the PRIMARY datastore for carts). PRIVATE to cart.
+  #
+  # Unlike the cache above, this is the source of truth for carts, so we enable
+  # AOF persistence (appendonly yes) — durability matters more here than for a
+  # pure cache. We do NOT set an eviction policy that drops keys, because evicting
+  # a cart would be data loss, not just a cache miss.
+  # ───────────────────────────────────────────────────────────────────────────
+  cart-redis:
+    image: redis:7-alpine
+    init: true
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - cart-data
+    volumes:
+      - cart_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:    { cpus: "0.25", memory: 160M }
+        reservations: { cpus: "0.05", memory: 64M }
+    restart: unless-stopped
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 3 — RabbitMQ message broker. On the backend network so all services can
+  # reach it. Management UI on 15672 (exposed in the override for local viewing).
+  # ───────────────────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    init: true
+    hostname: rabbitmq
+    networks: [backend]
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.75", memory: 512M }
+        reservations: { cpus: "0.10", memory: 256M }
+    restart: unless-stopped
+
+  # ── Order DB (Postgres, private to order-service) ──────────────────────────
+  order-db:
+    image: postgres:16-alpine
+    init: true
+    environment:
+      POSTGRES_DB: "orderdb"
+      POSTGRES_USER: "orderuser"
+      POSTGRES_PASSWORD_FILE: "/run/secrets/order_db_password"
+    secrets: [order_db_password]
+    networks: [order-data]
+    volumes:
+      - order_db_data:/var/lib/postgresql/data
+      - ./services/order/db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderuser -d orderdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+
+  # ── Payment DB (Postgres, private to payment-service) ──────────────────────
+  payment-db:
+    image: postgres:16-alpine
+    init: true
+    environment:
+      POSTGRES_DB: "paymentdb"
+      POSTGRES_USER: "paymentuser"
+      POSTGRES_PASSWORD_FILE: "/run/secrets/payment_db_password"
+    secrets: [payment_db_password]
+    networks: [payment-data]
+    volumes:
+      - payment_db_data:/var/lib/postgresql/data
+      - ./services/payment/db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paymentuser -d paymentdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+
+  # ── Inventory DB (Postgres, private to inventory-service) ──────────────────
+  inventory-db:
+    image: postgres:16-alpine
+    init: true
+    environment:
+      POSTGRES_DB: "inventorydb"
+      POSTGRES_USER: "inventoryuser"
+      POSTGRES_PASSWORD_FILE: "/run/secrets/inventory_db_password"
+    secrets: [inventory_db_password]
+    networks: [inventory-data]
+    volumes:
+      - inventory_db_data:/var/lib/postgresql/data
+      - ./services/inventory/db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventoryuser -d inventorydb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+
+volumes:
+  auth_db_data:
+    name: ecom_auth_db_data
+  catalog_mongo_data:
+    name: ecom_catalog_mongo_data
+  cart_redis_data:
+    name: ecom_cart_redis_data
+  order_db_data:
+    name: ecom_order_db_data
+  payment_db_data:
+    name: ecom_payment_db_data
+  inventory_db_data:
+    name: ecom_inventory_db_data
+  rabbitmq_data:
+    name: ecom_rabbitmq_data

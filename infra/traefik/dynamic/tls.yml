@@ -1,0 +1,17 @@
+# =============================================================================
+# tls.yml — Traefik DYNAMIC configuration: TLS certificate wiring.
+#
+# Points Traefik at the locally-generated self-signed certificate. In production
+# you'd use Let's Encrypt (Traefik can do ACME automatically) or a corporate CA;
+# locally we generate our own cert with scripts/generate-certs.sh.
+# =============================================================================
+
+tls:
+  certificates:
+    - certFile: /etc/traefik/certs/local.crt
+      keyFile: /etc/traefik/certs/local.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/certs/local.crt
+        keyFile: /etc/traefik/certs/local.key

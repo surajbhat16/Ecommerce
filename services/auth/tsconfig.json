@@ -1,0 +1,31 @@
+{
+  // ──────────────────────────────────────────────────────────────────────────
+  // Self-contained TypeScript config for the auth service.
+  //
+  // NOTE: we DON'T use `extends: ../../tsconfig.base.json` here. Inside the Docker
+  // build, each service is built from its OWN folder as the context, so a parent
+  // path like ../../tsconfig.base.json does not exist in the image and the build
+  // fails. Keeping every compiler option inline makes each service build context
+  // fully self-contained. (tsconfig.base.json at the repo root is kept only as
+  // human-readable documentation of the shared settings.)
+  // ──────────────────────────────────────────────────────────────────────────
+  "compilerOptions": {
+    "target": "ES2022",            // Node 20 supports ES2022 natively.
+    "module": "NodeNext",          // Modern Node module resolution (ESM-aware).
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "./dist",            // Compiled JS lands here; this is what runs in prod.
+    "rootDir": "./src",
+    "strict": true,                // Full strictness — production discipline.
+    "esModuleInterop": true,       // Allows default-importing CommonJS modules (pino, pg…).
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

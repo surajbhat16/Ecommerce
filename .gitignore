@@ -1,0 +1,18 @@
+# ── Generated locally, never committed ───────────────────────────────────────
+# Secrets (generate-secrets.sh) and TLS material (generate-certs.sh).
+# Anyone cloning the repo regenerates these; CI does the same in its workflow.
+infra/secrets/
+infra/traefik/certs/
+*.pem
+*.key
+*.crt
+
+# ── Build artifacts & dependencies ───────────────────────────────────────────
+node_modules/
+dist/
+npm-debug.log*
+
+# ── Local environment ────────────────────────────────────────────────────────
+.env
+.env.*
+!infra/secrets/.gitkeep

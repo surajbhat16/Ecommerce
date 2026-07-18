@@ -1,0 +1,416 @@
+# =============================================================================
+# docker-compose.yml — BASE compose file.
+#
+# This is the foundation layer. It defines:
+#   - the segmented NETWORKS (edge / backend / auth-data),
+#   - Traefik (the edge reverse proxy + load balancer),
+#   - the API Gateway (the scaled, load-balanced service),
+#   - the Auth service,
+#   - SECRETS,
+#   - resource LIMITS, HEALTH CHECKS, and `--init` for signal handling.
+#
+# The DATABASE lives in docker-compose.data.yml (separate concern, separate file).
+# Compose MERGES multiple -f files; the Makefile wires them together.
+#
+# Run the full stack with:
+#   docker compose -f docker-compose.yml -f docker-compose.data.yml up
+# (the Makefile gives you `make up` so you don't type that by hand.)
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NETWORK SEGMENTATION (defense in depth).
+#
+#   edge       — public-facing. Only Traefik and the Gateway sit here.
+#   backend    — service-to-service mesh. Gateway + business services.
+#   auth-data  — PRIVATE data segment for auth. internal:true means NO route to
+#                the internet and nothing outside attaches to it except the auth
+#                service and its database. This enforces database-per-service at
+#                the NETWORK layer, not just by convention.
+#
+# A compromised public edge cannot reach a database directly — it must go through
+# the gateway, then a service, and only that service can touch its own DB network.
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  edge:
+    name: ecom_edge
+  backend:
+    name: ecom_backend
+  auth-data:
+    name: ecom_auth_data
+    internal: true   # ← no outbound internet; isolated data tier
+  # ── Phase 2 data segments (each internal: true, one per service's datastores) ──
+  catalog-data:
+    name: ecom_catalog_data
+    internal: true   # catalog-service + its MongoDB + its Redis only
+  cart-data:
+    name: ecom_cart_data
+    internal: true   # cart-service + its Redis only
+  # ── Phase 3 data segments ──────────────────────────────────────────────────
+  order-data:
+    name: ecom_order_data
+    internal: true
+  payment-data:
+    name: ecom_payment_data
+    internal: true
+  inventory-data:
+    name: ecom_inventory_data
+    internal: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECRETS — file-backed (Compose). Mounted into containers at /run/secrets/<name>.
+# The application reads <NAME>_FILE pointing at these mount paths (see config.ts).
+# ─────────────────────────────────────────────────────────────────────────────
+secrets:
+  auth_db_password:
+    file: ./infra/secrets/auth_db_password.txt
+  jwt_signing_key:
+    file: ./infra/secrets/jwt_signing_key.txt
+  # Phase 2: MongoDB root password for the catalog store.
+  catalog_mongo_password:
+    file: ./infra/secrets/catalog_mongo_password.txt
+  # Phase 3: one DB password per new service (database-per-service).
+  order_db_password:
+    file: ./infra/secrets/order_db_password.txt
+  payment_db_password:
+    file: ./infra/secrets/payment_db_password.txt
+  inventory_db_password:
+    file: ./infra/secrets/inventory_db_password.txt
+
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Traefik — edge reverse proxy, TLS termination, load balancer.
+  # ───────────────────────────────────────────────────────────────────────────
+  traefik:
+    image: traefik:v3.1
+    init: true                       # tini as PID 1 → clean signal handling
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "80:80"       # HTTP (redirects to HTTPS)
+      - "443:443"     # HTTPS
+      - "8081:8081"   # Traefik dashboard (local only)
+    volumes:
+      # Traefik reads container labels via the Docker socket. READ-ONLY mount —
+      # least privilege. (The socket is powerful; ro limits the blast radius.)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./infra/traefik/certs:/etc/traefik/certs:ro
+    networks:
+      - edge
+    healthcheck:
+      # Traefik's /ping endpoint on the dashboard entrypoint.
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:    { cpus: "0.50", memory: 128M }
+        reservations: { cpus: "0.10", memory: 64M }
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # API Gateway — the STATELESS, SCALED, load-balanced service.
+  #
+  # `docker compose up --scale api-gateway=3` launches 3 replicas; Traefik
+  # round-robins across them (this is the load-balancing demo). Because it's
+  # stateless, replicas are interchangeable.
+  # ───────────────────────────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    init: true
+    environment:
+      PORT: "8080"
+      LOG_LEVEL: "info"
+      AUTH_UPSTREAM: "http://auth-service:3000"
+      CATALOG_UPSTREAM: "http://catalog-service:3000"
+      CART_UPSTREAM: "http://cart-service:3000"
+      ORDER_UPSTREAM: "http://order-service:3000"
+      JWT_ISSUER: "ecommerce-auth"
+      # Point the app at the secret FILE (Docker-secret path), not a raw value.
+      JWT_SIGNING_KEY_FILE: "/run/secrets/jwt_signing_key"
+      RATE_LIMIT_MAX: "100"
+      RATE_LIMIT_WINDOW_MS: "60000"
+    secrets:
+      - jwt_signing_key
+    networks:
+      - edge       # reachable by Traefik
+      - backend    # can call business services
+    # NO host port published — traffic only arrives via Traefik. This is correct:
+    # the gateway must not be directly reachable, only through the edge proxy.
+    labels:
+      # ── Traefik routing via labels (the Docker provider reads these) ────────
+      - "traefik.enable=true"
+      # Route HTTPS host api.localhost → this service.
+      - "traefik.http.routers.gateway.rule=Host(`api.localhost`)"
+      - "traefik.http.routers.gateway.entrypoints=websecure"
+      - "traefik.http.routers.gateway.tls=true"
+      # Tell Traefik which container port to load-balance to.
+      - "traefik.http.services.gateway.loadbalancer.server.port=8080"
+      # Use this network for Traefik→service traffic (the service is on two nets).
+      - "traefik.docker.network=ecom_edge"
+    healthcheck:
+      # Node has no curl in the slim image; use a tiny inline Node http check.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:    { cpus: "0.50", memory: 192M }
+        reservations: { cpus: "0.10", memory: 96M }
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Auth service — owns users/credentials, issues JWTs.
+  # ───────────────────────────────────────────────────────────────────────────
+  auth-service:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      DB_HOST: "auth-db"
+      DB_PORT: "5432"
+      DB_NAME: "authdb"
+      DB_USER: "authuser"
+      DB_PASSWORD_FILE: "/run/secrets/auth_db_password"
+      JWT_SIGNING_KEY_FILE: "/run/secrets/jwt_signing_key"
+      JWT_ISSUER: "ecommerce-auth"
+      JWT_ACCESS_TTL: "900"
+      JWT_REFRESH_TTL: "604800"
+    secrets:
+      - auth_db_password
+      - jwt_signing_key
+    networks:
+      - backend      # reachable by the gateway
+      - auth-data    # ← ONLY this service + its DB share this private network
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s   # allow time for DB to come up on first boot
+    deploy:
+      resources:
+        limits:    { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+    # Wait for the DB to be HEALTHY before starting (not just started). This is
+    # why the DB defines its own healthcheck in the data compose file.
+    depends_on:
+      auth-db:
+        condition: service_healthy
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 2 — Catalog service. MongoDB primary store + Redis cache-aside.
+  # ───────────────────────────────────────────────────────────────────────────
+  catalog-service:
+    build:
+      context: ./services/catalog
+      dockerfile: Dockerfile
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      MONGO_HOST: "catalog-mongo"
+      MONGO_PORT: "27017"
+      MONGO_DB: "catalogdb"
+      MONGO_USER: "root"
+      MONGO_PASSWORD_FILE: "/run/secrets/catalog_mongo_password"
+      REDIS_HOST: "catalog-redis"
+      REDIS_PORT: "6379"
+      CACHE_TTL: "60"
+    secrets:
+      - catalog_mongo_password
+    networks:
+      - backend        # reachable by the gateway
+      - catalog-data   # ← private: catalog-service + its Mongo + its Redis only
+    labels:
+      # Route public catalog reads through Traefik→gateway; but catalog itself is
+      # reached via the gateway, not directly by Traefik. No traefik labels needed.
+      - "traefik.enable=false"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s   # Mongo takes a moment on first boot
+    deploy:
+      resources:
+        limits:    { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+    depends_on:
+      catalog-mongo:
+        condition: service_healthy
+      catalog-redis:
+        condition: service_healthy
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 2 — Cart service. Redis as the PRIMARY datastore.
+  # ───────────────────────────────────────────────────────────────────────────
+  cart-service:
+    build:
+      context: ./services/cart
+      dockerfile: Dockerfile
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      REDIS_HOST: "cart-redis"
+      REDIS_PORT: "6379"
+      CART_TTL: "86400"
+    networks:
+      - backend      # reachable by the gateway
+      - cart-data    # ← private: cart-service + its Redis only
+    labels:
+      - "traefik.enable=false"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:    { cpus: "0.50", memory: 192M }
+        reservations: { cpus: "0.10", memory: 96M }
+    restart: unless-stopped
+    depends_on:
+      cart-redis:
+        condition: service_healthy
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 3 — Inventory service. Owns stock; participates in the checkout saga.
+  # ───────────────────────────────────────────────────────────────────────────
+  inventory-service:
+    build: { context: ./services/inventory, dockerfile: Dockerfile }
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      DB_HOST: "inventory-db"
+      DB_NAME: "inventorydb"
+      DB_USER: "inventoryuser"
+      DB_PASSWORD_FILE: "/run/secrets/inventory_db_password"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672"
+    secrets: [inventory_db_password]
+    networks: [backend, inventory-data]
+    labels: ["traefik.enable=false"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+    depends_on:
+      inventory-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 3 — Payment service. Deterministic failure on a configured SKU.
+  # ───────────────────────────────────────────────────────────────────────────
+  payment-service:
+    build: { context: ./services/payment, dockerfile: Dockerfile }
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      DB_HOST: "payment-db"
+      DB_NAME: "paymentdb"
+      DB_USER: "paymentuser"
+      DB_PASSWORD_FILE: "/run/secrets/payment_db_password"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672"
+      # Deterministic demo: any order with this SKU always fails payment.
+      PAYMENT_FAIL_SKU: "LAPTOP-001"
+    secrets: [payment_db_password]
+    networks: [backend, payment-data]
+    labels: ["traefik.enable=false"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+    depends_on:
+      payment-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 3 — Order service. The saga orchestrator + transactional outbox.
+  # Routed through the gateway at /api/orders/* (JWT-protected).
+  # ───────────────────────────────────────────────────────────────────────────
+  order-service:
+    build: { context: ./services/order, dockerfile: Dockerfile }
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      DB_HOST: "order-db"
+      DB_NAME: "orderdb"
+      DB_USER: "orderuser"
+      DB_PASSWORD_FILE: "/run/secrets/order_db_password"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672"
+      OUTBOX_POLL_MS: "1000"
+    secrets: [order_db_password]
+    networks: [backend, order-data]
+    labels: ["traefik.enable=false"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+        reservations: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped
+    depends_on:
+      order-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 4 — Notification service. A PURE event consumer: no database, no
+  # secrets, no publishing. Binds its own queue to the same topic exchange the
+  # saga services use — demonstrating pub/sub FAN-OUT. Note the smaller
+  # resource limits: a consumer that holds no state needs less headroom.
+  # ───────────────────────────────────────────────────────────────────────────
+  notification-service:
+    build: { context: ./services/notification, dockerfile: Dockerfile }
+    init: true
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672"
+    networks: [backend]
+    labels: ["traefik.enable=false"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+        reservations: { cpus: "0.05", memory: 64M }
+    restart: unless-stopped
+    depends_on:
+      rabbitmq: { condition: service_healthy }

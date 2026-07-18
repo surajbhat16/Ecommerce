@@ -1,0 +1,70 @@
+# =============================================================================
+# docker-compose.override.yml — LOCAL DEV overlay (auto-loaded).
+#
+# Docker Compose AUTOMATICALLY merges a file named docker-compose.override.yml
+# on top of docker-compose.yml when you run plain `docker compose up`. This is
+# the idiomatic way to keep dev-only conveniences OUT of the base file.
+#
+# Here we expose extra host ports so you can hit services DIRECTLY (bypassing
+# Traefik) for debugging. In a prod-like run you'd use docker-compose.prod.yml
+# (added in Phase 6) instead, which does NOT expose these.
+#
+# NOTE: because this is auto-loaded, when we build the explicit `-f` chain in the
+# Makefile we include it explicitly to keep behaviour predictable.
+# =============================================================================
+
+services:
+  # Expose the auth DB to the host so you can inspect it with psql/DBeaver while
+  # developing. (In prod the DB stays on its internal network, unreachable.)
+  auth-db:
+    ports:
+      - "5433:5432"   # host 5433 → container 5432 (5433 avoids clashing local PG)
+
+  # Expose the gateway directly on the host for quick curls without TLS/Traefik.
+  api-gateway:
+    ports:
+      - "8080:8080"
+
+  # Expose auth-service directly too, for isolated testing.
+  auth-service:
+    ports:
+      - "3000:3000"
+
+  # ── Phase 2 debug port exposure ──────────────────────────────────────────────
+  catalog-service:
+    ports:
+      - "3001:3000"   # hit catalog directly for debugging
+  cart-service:
+    ports:
+      - "3002:3000"   # hit cart directly for debugging
+  catalog-mongo:
+    ports:
+      - "27017:27017" # inspect Mongo with Compass/mongosh
+  catalog-redis:
+    ports:
+      - "6380:6379"   # inspect the catalog cache
+  cart-redis:
+    ports:
+      - "6381:6379"   # inspect the cart store
+
+  # ── Phase 3 debug port exposure ──────────────────────────────────────────────
+  order-service:
+    ports: ["3003:3000"]
+  payment-service:
+    ports: ["3004:3000"]
+  inventory-service:
+    ports: ["3005:3000"]
+  rabbitmq:
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI (http://localhost:15672, guest/guest)
+  order-db:
+    ports: ["5434:5432"]
+  payment-db:
+    ports: ["5435:5432"]
+  inventory-db:
+    ports: ["5436:5432"]
+
+  # ── Phase 4 debug port exposure ──────────────────────────────────────────────
+  notification-service:
+    ports: ["3006:3000"]   # GET /notifications to see what was "sent"

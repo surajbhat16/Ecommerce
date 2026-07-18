@@ -1,0 +1,25 @@
+{
+  // ──────────────────────────────────────────────────────────────────────────
+  // Base TypeScript configuration shared by every service.
+  // Each service extends this so compiler behaviour is identical everywhere —
+  // one source of truth, no drift between services.
+  // ──────────────────────────────────────────────────────────────────────────
+  "compilerOptions": {
+    "target": "ES2022",            // Node 20 supports ES2022 natively.
+    "module": "NodeNext",          // Modern Node module resolution (ESM-aware).
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "./dist",            // Compiled JS lands here; this is what runs in prod.
+    "rootDir": "./src",
+    "strict": true,                // Full strictness — production discipline.
+    "esModuleInterop": true,
+    "skipLibCheck": true,          // Skip type-checking node_modules for speed.
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": true,             // Helps debugging; stripped from runtime image anyway.
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,86 @@
+# =============================================================================
+# docker-compose.prod.yml — Phase 6 production-like overlay.
+#
+# Chain (NOTE: the dev override is deliberately ABSENT):
+#   docker compose -f docker-compose.yml -f docker-compose.data.yml \
+#     -f docker-compose.prod.yml up -d
+#   (+ optionally -f docker-compose.observability.yml before it)
+#
+# What "prod-like" means here, concretely:
+#   1. NO debug ports. Every host port except 80/443 lives in the dev override;
+#      omitting that file removes them all, and `!override` below strips
+#      Traefik's dashboard port too. Attack surface = the edge, nothing else.
+#   2. Gateway runs 2 replicas — Traefik discovers both via Docker labels and
+#      load-balances them (the Phase 1 seam, finally exercised).
+#   3. Hardening: no-new-privileges on every container (a compromised process
+#      can't escalate via setuid binaries), and log rotation so json-file logs
+#      can't fill the disk.
+#   4. Config stays identical to dev in SHAPE (same images, same env keys) —
+#      dev/prod parity: what you tested is what you run.
+#
+# Honest limits (also good interview material): guest/guest RabbitMQ and the
+# self-signed cert are still dev artifacts — real prod would use provisioned
+# credentials/ACME; secrets would come from a manager, not files; and
+# `deploy.resources` limits are enforced by compose only partially. Named and
+# known > silently assumed.
+# =============================================================================
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  traefik:
+    # !override REPLACES the merged list instead of appending: the dashboard
+    # port (8081) from the base file is dropped; only the real edge remains.
+    ports: !override
+      - "80:80"
+      - "443:443"
+    <<: *hardening
+
+  api-gateway:
+    <<: *hardening
+    deploy:
+      replicas: 2
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+    environment:
+      NODE_ENV: "production"
+      LOG_LEVEL: "info"
+
+  auth-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+  catalog-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+  cart-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+  order-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+  payment-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+  inventory-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+  notification-service:
+    <<: *hardening
+    environment: { NODE_ENV: "production", LOG_LEVEL: "info" }
+
+  # Data tier: hardened + rotated logs. No ports were ever published here.
+  auth-db: { <<: *hardening }
+  order-db: { <<: *hardening }
+  payment-db: { <<: *hardening }
+  inventory-db: { <<: *hardening }
+  catalog-mongo: { <<: *hardening }
+  catalog-redis: { <<: *hardening }
+  cart-redis: { <<: *hardening }
+  rabbitmq: { <<: *hardening }

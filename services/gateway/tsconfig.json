@@ -1,0 +1,26 @@
+{
+  // ──────────────────────────────────────────────────────────────────────────
+  // Self-contained TypeScript config for the gateway service.
+  // See the auth service tsconfig for why we inline options instead of using
+  // `extends` (the parent path doesn't exist inside the Docker build context).
+  // ──────────────────────────────────────────────────────────────────────────
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

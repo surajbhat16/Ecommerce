@@ -1,0 +1,10 @@
+# Keep the Docker build context small and prevent leaking local artifacts into
+# the image. A bloated context slows every build and risks shipping secrets.
+node_modules
+dist
+npm-debug.log
+.git
+.env
+*.md
+Dockerfile
+.dockerignore
