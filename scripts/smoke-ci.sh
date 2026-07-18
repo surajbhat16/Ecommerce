@@ -45,7 +45,15 @@ echo "   $A -> $SA ; $B -> $SB ; $C -> $SC"
 [ "$SC" = "REJECTED" ]  || fail "expected REJECTED, got $SC"
 
 echo "3) compensation restored stock"
-AVAIL=$(curl -s http://localhost:3005/stock | jq -r '.stock[] | select(.sku=="LAPTOP-001") | .available')
+# The FAILED path's compensation (inventory.release) is asynchronous — it may
+# land shortly AFTER the order reaches its FAILED terminal state. Poll for the
+# stock to return to 2 rather than checking once (which races the release event).
+AVAIL=""
+for _ in $(seq 1 15); do
+  AVAIL=$(curl -s http://localhost:3005/stock | jq -r '.stock[] | select(.sku=="LAPTOP-001") | .available')
+  [ "$AVAIL" = "2" ] && break
+  sleep 1
+done
 [ "$AVAIL" = "2" ] || fail "LAPTOP-001 available=$AVAIL, expected 2 after compensation"
 
 echo "4) fan-out notifications arrived"
