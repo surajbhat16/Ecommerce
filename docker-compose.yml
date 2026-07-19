@@ -148,6 +148,14 @@ services:
       - "traefik.http.routers.gateway.rule=Host(`api.localhost`)"
       - "traefik.http.routers.gateway.entrypoints=websecure"
       - "traefik.http.routers.gateway.tls=true"
+      # Also answer app.localhost/api/* so the storefront's API calls are
+      # same-origin (no CORS). This router lives on the gateway — where the
+      # `gateway` service is defined — so there's no cross-container reference.
+      - "traefik.http.routers.gateway-app.rule=Host(`app.localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.gateway-app.entrypoints=websecure"
+      - "traefik.http.routers.gateway-app.tls=true"
+      - "traefik.http.routers.gateway-app.priority=10"
+      - "traefik.http.routers.gateway-app.service=gateway"
       # Tell Traefik which container port to load-balance to.
       - "traefik.http.services.gateway.loadbalancer.server.port=8080"
       # Use this network for Traefik→service traffic (the service is on two nets).
@@ -163,6 +171,42 @@ services:
       resources:
         limits:    { cpus: "0.50", memory: 192M }
         reservations: { cpus: "0.10", memory: 96M }
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PHASE 7 — Storefront (the UI). A static React SPA served by nginx, behind
+  # the SAME Traefik edge. Served at https://app.localhost. Crucially, /api/* on
+  # app.localhost is ALSO routed to the gateway (higher priority), so the browser
+  # is SAME-ORIGIN for both the app and its API calls — no CORS, one auth
+  # boundary. The UI never talks to a backend service directly.
+  # ───────────────────────────────────────────────────────────────────────────
+  storefront:
+    build:
+      context: ./services/storefront
+      dockerfile: Dockerfile
+    init: true
+    networks:
+      - edge       # reachable by Traefik
+      - backend    # same two-network shape as the gateway (which Traefik routes fine)
+    labels:
+      - "traefik.enable=true"
+      # UI: app.localhost serves the SPA from this container.
+      - "traefik.http.routers.storefront.rule=Host(`app.localhost`)"
+      - "traefik.http.routers.storefront.entrypoints=websecure"
+      - "traefik.http.routers.storefront.tls=true"
+      - "traefik.http.routers.storefront.priority=1"
+      - "traefik.http.services.storefront.loadbalancer.server.port=8080"
+      - "traefik.docker.network=ecom_edge"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:    { cpus: "0.25", memory: 96M }
+        reservations: { cpus: "0.05", memory: 32M }
     restart: unless-stopped
 
   # ───────────────────────────────────────────────────────────────────────────

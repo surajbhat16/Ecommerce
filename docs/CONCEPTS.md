@@ -2658,3 +2658,170 @@ dashboard is gone — `curl.exe -s -o NUL -w "%{http_code}" http://localhost:808
     assert on published ports programmatically — config-as-code gets
     tests too; that assertion is exactly what scripts/verify-phase6.ps1
     automates.)
+
+---
+
+# Phase 7 — Concept Deep-Dive
+
+One concept underpins the storefront layer, covered with mechanics, a worked
+example, and senior-level interview Q&A:
+
+18. Serving a SPA behind a reverse proxy (static hosting, same-origin API, SPA routing)
+
+---
+
+## 18. Serving a SPA Behind a Reverse Proxy
+
+### The principle
+
+A single-page application is, at deploy time, just a folder of static files —
+one `index.html`, a fingerprinted JS bundle, a CSS bundle. It has no server of
+its own; it runs entirely in the browser and talks to the backend over HTTP.
+The engineering questions are therefore: what serves those static files, how do
+the browser's API calls reach the backend, and how does client-side routing
+survive a page refresh. This platform answers all three with the edge it already
+has: nginx serves the bundle, Traefik routes `app.localhost/api/*` to the
+gateway so API calls are same-origin, and an nginx fallback rule makes deep links
+work.
+
+### The minute sub-concepts
+
+**Build-time vs runtime for a SPA.** The React source is compiled ONCE at build
+time (`vite build`) into static assets; there is no React "running" on a server.
+This is why the runtime image is nginx, not Node — the multi-stage Dockerfile
+builds with Node then throws Node away, shipping only nginx + the `dist` folder.
+The final image's attack surface is nginx and static files: no application
+runtime, no npm dependencies present at runtime at all.
+
+**Same-origin vs CORS — a routing decision, not a code decision.** A browser
+treats `app.localhost` and `api.localhost` as different origins; a call from one
+to the other is cross-origin and triggers CORS preflights and headers. This
+platform sidesteps CORS entirely by serving BOTH the UI and the API under one
+origin: `app.localhost` serves the SPA, and `app.localhost/api/*` is routed to
+the gateway by a higher-priority Traefik router. The browser sees one origin, so
+there is no CORS to configure. The "fix" for CORS was an edge-routing choice, not
+a header dance — which is the cleaner answer whenever you control the edge.
+
+**Router priority resolves the overlap.** Two routers now match requests to
+`app.localhost`: the SPA catch-all (`Host(app.localhost)`) and the API route
+(`Host(app.localhost) && PathPrefix(/api)`). Both match a `/api/...` request, so
+Traefik needs a tiebreaker: explicit `priority`. The API router is given higher
+priority so `/api/*` wins and goes to the gateway; everything else falls through
+to the SPA. Rule specificity plus explicit priority is how overlapping routes are
+disambiguated in every reverse proxy.
+
+**SPA routing and the refresh problem.** Client-side routing means the URL
+`/products/BOOK-001` is handled by JavaScript in the browser — but if the user
+refreshes, the browser asks the SERVER for `/products/BOOK-001`, which doesn't
+exist as a file. Without handling, that's a 404. The fix is the nginx
+`try_files $uri $uri/ /index.html` rule: serve the file if it exists, otherwise
+serve `index.html` and let the client router take over. Every statically-hosted
+SPA needs this fallback; forgetting it is the classic "works until you refresh"
+bug.
+
+**Cache strategy follows the fingerprint.** Vite emits assets with content
+hashes in their names (`index-8G9FJAtQ.js`). Because the name changes whenever
+the content changes, those files can be cached forever (`Cache-Control:
+immutable`) — a new deploy produces new names, so there's no stale-cache risk.
+`index.html` itself, which references the hashed files, must NOT be long-cached,
+or browsers would load an old index pointing at deleted bundles. This split —
+immutable assets, always-revalidate HTML — is the standard SPA caching contract.
+
+**The token lives in the browser, and that has consequences.** The JWT from
+login is held in the SPA (here, `sessionStorage`) and attached to protected
+calls. This is a deliberate, discussable trade-off: `sessionStorage`/
+`localStorage` are readable by any JS on the page, so they're vulnerable to XSS
+but immune to CSRF; an `HttpOnly` cookie is the reverse (immune to XSS
+exfiltration, but needs CSRF protection). For a portfolio demo the storage
+approach is fine; naming the trade-off is the senior signal.
+
+**The UI is just another service behind the edge.** The storefront gets the same
+treatment as every backend service: multi-stage build, non-root runtime,
+healthcheck, resource limits, Traefik labels, a slot in the CI matrices, and
+inclusion in the compose smoke boot. Nothing about it being "the frontend" makes
+it special to the platform — it's a container with a route, which is exactly how
+it should be.
+
+### Practical worked example
+
+The same-origin trick is entirely in Traefik labels — no application code knows
+about it:
+
+```yaml
+# SPA catch-all (low priority)
+- "traefik.http.routers.storefront.rule=Host(`app.localhost`)"
+- "traefik.http.routers.storefront.priority=1"
+- "traefik.http.services.storefront.loadbalancer.server.port=8080"
+# API on the SAME host (high priority) -> points at the gateway service
+- "traefik.http.routers.storefront-api.rule=Host(`app.localhost`) && PathPrefix(`/api`)"
+- "traefik.http.routers.storefront-api.priority=10"
+- "traefik.http.routers.storefront-api.service=gateway"
+```
+
+So the browser's `fetch('/api/auth/login')` is same-origin (no CORS), hits
+Traefik, matches the higher-priority API router, and is proxied to the gateway —
+which validates the JWT and forwards to the auth service. The SPA's API client is
+correspondingly trivial: every call is to a relative `/api/...` path with no host,
+no CORS mode, no credentials juggling.
+
+The SPA-refresh fallback is one nginx directive:
+
+```nginx
+location / { try_files $uri $uri/ /index.html; }
+```
+
+Refresh `https://app.localhost/anything` and nginx serves `index.html`; the React
+router then renders the right view.
+
+### 10 senior interview questions
+
+1. **A SPA is "just static files" — so why is the runtime image nginx and not
+   Node?** (Because there's nothing to run server-side: the bundle executes in
+   the browser. nginx serves files with a tiny attack surface; keeping Node would
+   ship an unused runtime and its CVEs. The multi-stage build uses Node only to
+   compile, then discards it.)
+2. **Your frontend calls the backend and you see CORS errors. Give two fixes and
+   pick one for a system where you own the edge.** (Configure CORS headers on the
+   backend, OR serve UI and API under one origin via the reverse proxy. If you
+   own the edge, same-origin routing is cleaner — no preflights, no header
+   maintenance, one origin to reason about.)
+3. **Two Traefik routers match the same host. How is the winner chosen, and how
+   do you make it deterministic?** (Rule specificity contributes, but rely on
+   explicit `priority`: the more specific `PathPrefix(/api)` router gets higher
+   priority so it wins for /api/*, and the catch-all handles the rest.)
+4. **A user refreshes on /orders/123 and gets a 404. What's wrong and what's the
+   fix?** (The server has no file at that path — client-side routes aren't files.
+   Fix: SPA fallback (`try_files ... /index.html`) so the server returns the app
+   shell and the client router resolves the path.)
+5. **Design the cache headers for a Vite build and justify each.** (Hashed
+   `/assets/*` are immutable -> `Cache-Control: public, immutable, max-age=1y`
+   since a content change changes the name; `index.html` -> no-cache/short TTL so
+   it always points at the current bundle names. Long-caching index.html strands
+   users on deleted assets.)
+6. **Where do you store the JWT in a browser SPA, and what's the trade-off
+   matrix?** (localStorage/sessionStorage: simple, XSS-exposed, CSRF-immune;
+   HttpOnly cookie: XSS-safe for exfiltration, needs CSRF defense, sent
+   automatically. Choice depends on threat model; the honest answer names both
+   risks rather than claiming one is "secure".)
+7. **How do you inject environment-specific config (API base URL, feature flags)
+   into a static SPA that's already built?** (Options: build-time env baked into
+   the bundle (simple, needs rebuild per env — breaks artifact promotion); or a
+   runtime config.json / templated env fetched at startup (one artifact across
+   envs). The same-origin design here sidesteps the API-URL case entirely — it's
+   always relative /api.)
+8. **The SPA container passed the image scan but you're still worried about
+   frontend supply chain. What's the residual risk scanners miss?** (The npm deps
+   were compiled INTO the bundle at build time — a malicious/compromised
+   dependency's code ships inside the JS even though it's not a runtime package
+   the scanner sees. Mitigations: lockfile pinning, dependency review, SRI,
+   build-time SBOM of the frontend tree.)
+9. **How would you scale the storefront, and why is it trivial compared to a
+   stateful service?** (It's static files — run N nginx replicas behind Traefik,
+   or push the assets to a CDN/object store entirely. No state, no coordination;
+   the hard scaling problems live in the stateful backend services, not here.)
+10. **Walk a request for https://app.localhost/api/orders from browser to
+    database.** (Browser fetch (same-origin) -> Traefik terminates TLS, matches
+    the high-priority /api router -> gateway validates the JWT, injects x-user-id,
+    proxies to the order service -> order service writes to Postgres and the
+    outbox in one transaction, returns 202. The UI never touched a backend
+    directly; every hop is the same path the CLI verify scripts exercise.)

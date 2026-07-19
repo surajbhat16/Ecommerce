@@ -68,3 +68,7 @@ services:
   # ── Phase 4 debug port exposure ──────────────────────────────────────────────
   notification-service:
     ports: ["3006:3000"]   # GET /notifications to see what was "sent"
+
+  # ── Phase 7 storefront debug port ────────────────────────────────────────────
+  storefront:
+    ports: ["3007:8080"]   # http://localhost:3007 to hit the UI without Traefik

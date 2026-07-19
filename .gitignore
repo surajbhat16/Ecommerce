@@ -16,3 +16,6 @@ npm-debug.log*
 .env
 .env.*
 !infra/secrets/.gitkeep
+
+# ── Personal interview-prep study guide (not part of the curated project docs) ─
+docs/DEVOPS_MASTERY_GUIDE.pdf

@@ -1,0 +1,168 @@
+/* ============================================================================
+   Meridian storefront — an "engineering console meets shop" aesthetic.
+   The subject is a distributed system, so the design leans into that: mono
+   type for data/SKUs, a signal-amber accent for live events, semantic saga
+   colors, and a checkout that reveals the machinery behind each purchase.
+   ============================================================================ */
+
+:root {
+  --ink:      #14161a;   /* near-black, the console background feel on panels */
+  --paper:    #f6f4ee;   /* warm off-white page */
+  --paper-2:  #ece8de;   /* slightly deeper paper for cards */
+  --line:     #d6d1c4;   /* hairline */
+  --muted:    #6b6d72;
+  --text:     #22242a;
+  --signal:   #d98a2b;   /* amber — live events, the moving parts */
+  --confirmed:#2f7d5c;
+  --failed:   #b23b3b;
+  --rejected: #8a6d1f;
+  --pending:  #4a6b8a;
+  --mono: 'SFMono-Regular', ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; }
+body {
+  background: var(--paper);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+  position: sticky; top: 0; z-index: 10;
+}
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand h1 {
+  margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em;
+}
+.brand .tag {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.header-actions { display: flex; align-items: center; gap: 14px; }
+.who { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+main {
+  max-width: 1180px; margin: 0 auto; padding: 28px;
+  display: grid; grid-template-columns: 1fr 340px; gap: 28px;
+}
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+section.catalog h2, aside h2 {
+  font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); font-weight: 600; margin: 0 0 14px;
+}
+
+/* ── Category tabs ───────────────────────────────────────────────────────── */
+.cats { display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+.cats button {
+  font-family: var(--mono); font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.05em; padding: 6px 12px; border: 1px solid var(--line);
+  background: transparent; color: var(--muted); border-radius: 2px; cursor: pointer;
+}
+.cats button.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* ── Product grid ────────────────────────────────────────────────────────── */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.card {
+  border: 1px solid var(--line); background: var(--paper-2); border-radius: 4px;
+  padding: 18px; display: flex; flex-direction: column; gap: 8px;
+}
+.card .sku { font-family: var(--mono); font-size: 11px; color: var(--signal); letter-spacing: 0.04em; }
+.card .name { font-weight: 600; font-size: 16px; line-height: 1.25; }
+.card .desc { color: var(--muted); font-size: 13px; flex: 1; }
+.card .attrs { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.7; }
+.card .row { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.card .price { font-family: var(--mono); font-weight: 600; font-size: 15px; }
+
+button.add {
+  font-family: var(--sans); font-size: 13px; font-weight: 500;
+  padding: 7px 14px; border: 1px solid var(--ink); background: var(--ink);
+  color: var(--paper); border-radius: 3px; cursor: pointer;
+}
+button.add:hover { background: #000; }
+button.ghost {
+  background: transparent; color: var(--ink); border: 1px solid var(--line);
+  padding: 7px 14px; border-radius: 3px; cursor: pointer; font-size: 13px;
+}
+
+/* ── Cart aside ──────────────────────────────────────────────────────────── */
+aside {
+  border: 1px solid var(--line); border-radius: 4px; background: var(--paper-2);
+  padding: 20px; height: fit-content; position: sticky; top: 92px;
+}
+.cart-line { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.cart-line .sku { font-family: var(--mono); font-size: 12px; }
+.cart-line .qty { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.cart-line button { background: none; border: none; color: var(--failed); cursor: pointer; font-size: 12px; }
+.empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+
+button.checkout {
+  width: 100%; margin-top: 16px; padding: 12px; border: none; border-radius: 3px;
+  background: var(--signal); color: #1a1204; font-weight: 600; font-size: 14px; cursor: pointer;
+}
+button.checkout:disabled { background: var(--line); color: var(--muted); cursor: not-allowed; }
+
+/* quick-order shortcuts — the demo saga paths */
+.demos { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.demos p { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; }
+.demos button { display: block; width: 100%; text-align: left; margin-bottom: 6px; font-family: var(--mono); font-size: 11px; }
+
+/* ── The signature element: the saga panel ───────────────────────────────── */
+.saga-overlay {
+  position: fixed; inset: 0; background: rgba(16,17,20,0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px;
+}
+.saga {
+  background: var(--ink); color: var(--paper); border-radius: 8px;
+  width: 100%; max-width: 560px; padding: 28px; font-family: var(--mono);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+}
+.saga h3 { margin: 0 0 4px; font-family: var(--sans); font-size: 18px; }
+.saga .oid { font-size: 11px; color: #8b8d93; margin-bottom: 20px; word-break: break-all; }
+.saga .state-badge {
+  display: inline-block; padding: 4px 12px; border-radius: 3px; font-size: 12px;
+  font-weight: 600; letter-spacing: 0.04em; margin-bottom: 20px;
+}
+.badge-PENDING, .badge-AWAITING_PAYMENT { background: var(--pending); color: #fff; }
+.badge-CONFIRMED { background: var(--confirmed); color: #fff; }
+.badge-FAILED { background: var(--failed); color: #fff; }
+.badge-REJECTED { background: var(--rejected); color: #fff; }
+
+.timeline { display: flex; flex-direction: column; gap: 2px; margin: 8px 0 20px; }
+.step { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; opacity: 0.35; transition: opacity 0.4s; }
+.step.on { opacity: 1; }
+.step .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--signal); margin-top: 6px; flex-shrink: 0; }
+.step .svc { color: #8b8d93; font-size: 11px; min-width: 96px; }
+.step .evt { font-size: 12.5px; color: var(--paper); }
+.saga .close {
+  width: 100%; padding: 10px; border: 1px solid #33353b; background: transparent;
+  color: var(--paper); border-radius: 3px; cursor: pointer; font-family: var(--sans);
+}
+.saga .hint { font-family: var(--sans); font-size: 12px; color: #8b8d93; margin: 4px 0 16px; }
+.saga .trace-link { color: var(--signal); font-size: 12px; font-family: var(--sans); }
+
+/* ── Auth gate ───────────────────────────────────────────────────────────── */
+.auth-wrap { max-width: 380px; margin: 80px auto; padding: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-2); }
+.auth-wrap h2 { margin: 0 0 6px; font-size: 20px; }
+.auth-wrap p { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+.auth-wrap input {
+  width: 100%; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--line);
+  border-radius: 3px; font-size: 14px; font-family: var(--sans); background: var(--paper);
+}
+.auth-wrap button { width: 100%; padding: 11px; border: none; border-radius: 3px; background: var(--ink); color: var(--paper); font-weight: 600; cursor: pointer; }
+.auth-wrap .switch { text-align: center; margin-top: 14px; font-size: 13px; color: var(--muted); }
+.auth-wrap .switch button { background: none; border: none; color: var(--signal); cursor: pointer; width: auto; padding: 0; font-weight: 500; }
+.err { color: var(--failed); font-size: 13px; margin: 4px 0 10px; font-family: var(--mono); }
+
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--paper); padding: 10px 18px; border-radius: 4px; font-size: 13px; z-index: 60; }

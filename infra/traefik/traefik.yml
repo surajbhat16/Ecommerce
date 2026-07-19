@@ -38,7 +38,7 @@ providers:
   # service declares its own routing via labels in the compose file.
   docker:
     exposedByDefault: false   # only containers with `traefik.enable=true` are routed
-    network: edge             # Traefik talks to services on the `edge` network
+    network: ecom_edge             # Traefik talks to services on the `edge` network
   # File provider: for static dynamic-config (TLS certs) that isn't label-driven.
   file:
     directory: /etc/traefik/dynamic

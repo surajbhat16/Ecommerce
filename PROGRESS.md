@@ -114,6 +114,26 @@ the app services gain OpenTelemetry via compose env merge.
       clean seams
 ---
 
+## Phase 7 — Storefront UI ✅ (current)
+
+**Adds:** a React (Vite + TypeScript) single-page storefront, served as static
+files by nginx, behind the same Traefik edge at https://app.localhost.
+
+- [x] Static SPA in a multi-stage image (Node build -> nginx runtime; no Node in
+      the final image)
+- [x] Same-origin architecture: app.localhost serves the UI AND app.localhost/api/*
+      routes to the gateway (higher-priority Traefik router) -> no CORS, one auth
+      boundary, one TLS edge
+- [x] Full flow through the real gateway API: register/login, catalog browse by
+      category, cart, checkout
+- [x] Signature UI element: a live "checkout saga" panel that polls the order to
+      its terminal state and narrates the real events behind each transition, with
+      a link into Jaeger
+- [x] Wired into CI (build-test/scan/push matrices + hadolint), TLS cert SANs
+      updated for app.localhost, verify-phase7.ps1, runbook
+
+---
+
 ## Deferred / explicitly out of scope (and why)
 
 - **Multi-host orchestration / cloud autoscaling** — requires real infrastructure;

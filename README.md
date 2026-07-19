@@ -1,6 +1,6 @@
 # Production-Grade E-Commerce Microservices Platform
 
-[![ci](https://github.com/YOUR_USERNAME/ECommerce/actions/workflows/ci.yml/badge.svg)](https://github.com/surajbhat16/ECommerce/actions/workflows/ci.yml)
+[![ci](https://github.com/surajbhat16/ECommerce/actions/workflows/ci.yml/badge.svg)](https://github.com/surajbhat16/ECommerce/actions/workflows/ci.yml)
 
 A locally-runnable, production-patterned microservices system built to demonstrate
 **DevOps and container-engineering depth** end to end: multi-stage image builds,
@@ -13,16 +13,16 @@ The focus throughout is **infrastructure and delivery engineering**, not busines
 logic. Every service is intentionally thin; the interesting parts are how the
 services are built, wired, secured, observed, and shipped.
 
-> Built in six cumulative phases. Each phase adds one architectural capability and
+> Built in seven cumulative phases. Each phase adds one architectural capability and
 > reuses the patterns established before it. See `PROGRESS.md` for the phase log and
-> `docs/CONCEPTS.md` for 17 concept deep-dives with **187 senior interview Q&A**.
+> `docs/CONCEPTS.md` for 18 concept deep-dives with **197 senior interview Q&A**.
 
 ---
 
 ## Table of contents
 
 - [What this platform demonstrates](#what-this-platform-demonstrates)
-- [The six phases at a glance](#the-six-phases-at-a-glance)
+- [The seven phases at a glance](#the-seven-phases-at-a-glance)
 - [Full architecture](#full-architecture)
 - [The services](#the-services)
 - [Quick start](#quick-start)
@@ -62,7 +62,7 @@ services are built, wired, secured, observed, and shipped.
 
 ---
 
-## The six phases at a glance
+## The seven phases at a glance
 
 | Phase | Capability added | Key services / infra |
 |---|---|---|
@@ -72,6 +72,7 @@ services are built, wired, secured, observed, and shipped.
 | **4** | Event fan-out | Notification service (pure event consumer, event-carried state transfer) |
 | **5** | Observability (three pillars) | Prometheus, Grafana, Loki + Promtail, Jaeger + OpenTelemetry |
 | **6** | Delivery & hardening | GitHub Actions CI/CD, Trivy, GHCR, production compose profile |
+| **7** | Storefront UI | React (Vite + TS) SPA, static nginx image, same-origin behind Traefik |
 
 ---
 
@@ -85,8 +86,16 @@ services are built, wired, secured, observed, and shipped.
    │  Prometheus  │─ scrapes ───▶│  reverse proxy +    │  routes by Docker labels,
    │  (metrics)   │   :8082      │  TLS + load balancer │  round-robins gateway replicas
    └──────┬───────┘              └─────────┬──────────┘
-          │                                │
-          │ scrapes /metrics     ┌─────────▼──────────┐
+          │                     Host(app.localhost)  │  Host(app.localhost)+/api/*
+          │                     priority 1 ──┐        └── priority 10 (wins on /api)
+          │                                  ▼                        │
+          │                        ┌──────────────────┐               │
+          │                        │    Storefront     │               │
+          │                        │  (React SPA via   │               │
+          │                        │   nginx, :8080)    │              │
+          │                        └────────────────────┘              │
+          │                     Host(api.localhost) OR app.localhost/api/* ▼
+          │ scrapes /metrics     ┌─────────────────────┐
           │ from every service   │    API Gateway      │  JWT validation, rate limiting
           │                      │  (2+ stateless      │  injects x-user-id downstream
           │                      │   replicas)         │
@@ -126,6 +135,13 @@ convention. The observability stack lives in its own compose file: omit it and t
 platform runs exactly as before; add it and five containers plus zero-code
 OpenTelemetry instrumentation switch on.
 
+The storefront and the API share one hostname. `app.localhost/*` goes to the
+storefront container (priority 1); `app.localhost/api/*` is matched by a
+higher-priority router (10) that sends the request straight to the gateway
+instead. The browser is same-origin for both the page and its API calls — no
+CORS, one auth boundary, one TLS edge — even though two different containers
+answer.
+
 ---
 
 ## The services
@@ -140,10 +156,14 @@ OpenTelemetry instrumentation switch on.
 | **payment** | Node/TS | Payment authorization (deterministic demo) | PostgreSQL |
 | **inventory** | Node/TS | Stock reservation + compensation | PostgreSQL |
 | **notification** | Node/TS | Pure event consumer (pub/sub fan-out) | none (in-memory projection) |
+| **storefront** | React + Vite + TS, nginx | The UI: browse, cart, checkout, live saga panel | — (stateless SPA) |
 
-All eight share the same patterns: multi-stage Dockerfile, non-root runtime,
-file-based secrets, liveness/readiness probes, structured pino logging, graceful
-shutdown, and (Phase 5) Prometheus metrics + OpenTelemetry tracing.
+The eight backend services share the same patterns: multi-stage Dockerfile,
+non-root runtime, file-based secrets, liveness/readiness probes, structured pino
+logging, graceful shutdown, and (Phase 5) Prometheus metrics + OpenTelemetry
+tracing. The storefront is a static SPA — no Node in its runtime image, no
+secrets, no application logging — so it opts out of the patterns that don't
+apply to it.
 
 ---
 
@@ -158,7 +178,7 @@ are PowerShell.
 bash scripts/generate-secrets.sh
 bash scripts/generate-certs.sh
 
-# 2. Boot the full stack including observability (21 containers)
+# 2. Boot the full stack including observability (23 containers)
 docker compose -f docker-compose.yml -f docker-compose.data.yml \
   -f docker-compose.observability.yml -f docker-compose.override.yml up --build -d
 
@@ -179,6 +199,7 @@ rejects). This is baked in; no action needed.
 
 | URL | What |
 |---|---|
+| `https://app.localhost` | The storefront UI (register/login, browse, cart, checkout) |
 | `https://api.localhost` | The platform edge (via Traefik) |
 | `http://localhost:8081` | Traefik dashboard |
 | `http://localhost:15672` | RabbitMQ management (guest/guest) |
@@ -200,6 +221,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # once per terminal
 .\scripts\verify-phase4.ps1   # fan-out: notifications delivered + attributed
 .\scripts\verify-phase5.ps1   # observability: metrics + logs + a cross-service trace
 .\scripts\verify-phase6.ps1   # delivery: lockfiles + prod profile renders correctly
+.\scripts\verify-phase7.ps1   # storefront: same-origin routing + full UI flow through the real gateway
 ```
 
 ---
@@ -300,9 +322,9 @@ real deployment would harden next.
 ├── Makefile                          # convenience front door
 ├── PROGRESS.md                       # phase-by-phase log
 ├── docs/
-│   ├── CONCEPTS.md                   # 17 deep-dives, 187 senior interview Q&A
+│   ├── CONCEPTS.md                   # 18 deep-dives, 197 senior interview Q&A
 │   ├── PHASE{3..6}_CONCEPTS.pdf      # typeset concept documents
-│   └── PHASE{2..6}_RUNBOOK.md        # run/verify runbooks per phase
+│   └── PHASE{2..7}_RUNBOOK.md        # run/verify runbooks per phase
 ├── infra/
 │   ├── secrets/                      # *.txt (gitignored) + *.example templates
 │   ├── traefik/                      # static + dynamic config, certs (gitignored)
@@ -310,9 +332,10 @@ real deployment would harden next.
 │   ├── grafana/                      # provisioned datasources + dashboards
 │   └── rabbitmq/                     # prometheus plugin enablement
 ├── scripts/                          # secrets/cert generation, smoke + verify scripts
-└── services/                         # the 8 services, each a multi-stage Dockerfile
+└── services/                         # the 9 services, each a multi-stage Dockerfile
     ├── gateway/  auth/  catalog/  cart/
-    └── order/  payment/  inventory/  notification/
+    ├── order/  payment/  inventory/  notification/
+    └── storefront/                   # React SPA (Vite build -> nginx runtime)
 ```
 
 ---
@@ -350,11 +373,11 @@ real deployment would harden next.
 ## Documentation
 
 - **`PROGRESS.md`** — what each phase adds and why, with checkboxes.
-- **`docs/CONCEPTS.md`** — 17 concept deep-dives (saga, outbox, idempotency,
+- **`docs/CONCEPTS.md`** — 18 concept deep-dives (saga, outbox, idempotency,
   delivery semantics, DLQ, fan-out, event-carried state transfer, the three
-  observability pillars, CI/CD, supply-chain security, dev/prod parity), each with
-  minute sub-concepts, worked examples from this codebase, and 10 senior interview
-  Q&A. **187 Q&A total.**
+  observability pillars, CI/CD, supply-chain security, dev/prod parity, serving a
+  SPA behind a reverse proxy), each with minute sub-concepts, worked examples from
+  this codebase, and 10 senior interview Q&A. **197 Q&A total.**
 - **`docs/PHASE*_RUNBOOK.md`** — step-by-step run and verify instructions per phase.
 - **`docs/PHASE*_CONCEPTS.pdf`** — the concept deep-dives, typeset for reading.
 
