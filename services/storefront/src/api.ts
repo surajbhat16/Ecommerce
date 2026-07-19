@@ -87,15 +87,19 @@ export async function allProducts(): Promise<Product[]> {
 }
 
 // ── Cart (protected) ──────────────────────────────────────────────────────────
+// The gateway rewrites /api/cart/* -> /cart/* before proxying to the cart
+// service (see services/gateway rewritePrefix: '/cart'), and the cart service
+// itself serves its routes at /cart and /cart/items — so the client only ever
+// needs a single /cart segment, not /cart/cart.
 export async function getCart(): Promise<CartItem[]> {
   const data = await j<{ items?: CartItem[] }>(
-    await fetch(`${BASE}/cart/cart`, { headers: authHeaders() }),
+    await fetch(`${BASE}/cart`, { headers: authHeaders() }),
   );
   return data.items ?? [];
 }
 
 export async function addToCart(sku: string, quantity: number): Promise<void> {
-  await j(await fetch(`${BASE}/cart/cart/items`, {
+  await j(await fetch(`${BASE}/cart/items`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ sku, quantity }),
@@ -103,7 +107,7 @@ export async function addToCart(sku: string, quantity: number): Promise<void> {
 }
 
 export async function removeFromCart(sku: string): Promise<void> {
-  await j(await fetch(`${BASE}/cart/cart/items/${sku}`, {
+  await j(await fetch(`${BASE}/cart/items/${sku}`, {
     method: 'DELETE',
     headers: authHeaders(),
   }));
